@@ -8,6 +8,7 @@ if path not in sys.path:
 
 import argparse
 import torch
+from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from mmengine.config import Config, DictAction
 from opentad.models import build_detector
 from opentad.datasets import build_dataset, build_sequential_dataloader
@@ -83,10 +84,16 @@ def main():
         # Model EMA
         use_ema = getattr(cfg.solver, "ema", False)
         if use_ema:
-            model.load_state_dict(checkpoint["state_dict_ema"], strict=False)
+            state_dict = checkpoint["state_dict_ema"]
+            # Remove prefix 'module.' from the state_dict keys
+            consume_prefix_in_state_dict_if_present(state_dict, "module.")
+            model.load_state_dict(state_dict, strict=True)
             logger.info("Using Model EMA...")
         else:
-            model.load_state_dict(checkpoint["state_dict"], strict=False)
+            state_dict = checkpoint["state_dict"]
+            # Remove prefix 'module.' from the state_dict keys
+            consume_prefix_in_state_dict_if_present(state_dict, "module.")
+            model.load_state_dict(state_dict, strict=True)
 
     # AMP: automatic mixed precision
     use_amp = getattr(cfg.solver, "amp", False)
