@@ -1,4 +1,4 @@
-from .builder import build_dataset, build_dataloader
+from .builder import build_dataset, build_dataloader, build_sequential_dataloader
 from .transforms import *
 from .base import *
 from .anet import AnetResizeDataset, AnetPaddingDataset, AnetSlidingDataset
@@ -9,6 +9,7 @@ from .epic_kitchens import EpicKitchensSlidingDataset, EpicKitchensPaddingDatase
 __all__ = [
     "build_dataset",
     "build_dataloader",
+    "build_sequential_dataloader",
     "AnetResizeDataset",
     "AnetPaddingDataset",
     "AnetSlidingDataset",
