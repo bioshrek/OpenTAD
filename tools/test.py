@@ -47,7 +47,7 @@ def main():
     create_folder(cfg.work_dir)
 
     # setup logger
-    logger = setup_logger("Test", save_dir=cfg.work_dir, distributed_rank=args.rank)
+    logger = setup_logger("Test", save_dir=cfg.work_dir)
     logger.info(f"Using torch version: {torch.__version__}, CUDA version: {torch.version.cuda}")
     logger.info(f"Config: \n{cfg.pretty_text}")
 
