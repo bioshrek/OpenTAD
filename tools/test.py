@@ -83,10 +83,10 @@ def main():
         # Model EMA
         use_ema = getattr(cfg.solver, "ema", False)
         if use_ema:
-            model.load_state_dict(checkpoint["state_dict_ema"])
+            model.load_state_dict(checkpoint["state_dict_ema"], strict=False)
             logger.info("Using Model EMA...")
         else:
-            model.load_state_dict(checkpoint["state_dict"])
+            model.load_state_dict(checkpoint["state_dict"], strict=False)
 
     # AMP: automatic mixed precision
     use_amp = getattr(cfg.solver, "amp", False)
