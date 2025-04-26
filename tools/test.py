@@ -15,7 +15,7 @@ from opentad.models import build_detector
 from opentad.datasets import build_dataset, build_dataloader
 from opentad.cores import eval_one_epoch
 from opentad.utils import update_workdir, set_seed, create_folder, setup_logger
-
+from datetime import datetime
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test a Temporal Action Detector")
@@ -30,6 +30,9 @@ def parse_args():
 
 
 def main():
+    # Start recording memory snapshot history
+    torch.cuda.memory._record_memory_history(max_entries=100000)
+
     args = parse_args()
 
     # load config
@@ -117,6 +120,10 @@ def main():
     )
     logger.info("Testing Over...\n")
 
+    # Dump memory snapshot history to a file and stop recording
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    torch.cuda.memory._dump_snapshot(os.path.join(cfg.work_dir, f"memory_profile_{current_time}.pkl"))
+    torch.cuda.memory._record_memory_history(enabled=None)
 
 if __name__ == "__main__":
     main()
