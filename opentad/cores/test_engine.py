@@ -3,7 +3,6 @@ import copy
 import json
 import tqdm
 import torch
-import torch.distributed as dist
 
 from opentad.utils import create_folder
 from opentad.models.utils.post_processing import build_classifier, batched_nms
@@ -48,7 +47,13 @@ def eval_one_epoch(
     result_dict = {}
     for data_dict in tqdm.tqdm(test_loader, disable=(rank != 0)):
         with torch.cuda.amp.autocast(dtype=torch.float16, enabled=use_amp):
-            with torch.no_grad():
+            with torch.inference_mode():
+                
+                # move data to GPU
+                for k, v in data_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        data_dict[k] = v.cuda(non_blocking=True)
+
                 results = model(
                     **data_dict,
                     return_loss=False,
@@ -87,16 +92,6 @@ def eval_one_epoch(
 
 
 def gather_ddp_results(world_size, result_dict, post_cfg):
-    gather_dict_list = [None for _ in range(world_size)]
-    dist.all_gather_object(gather_dict_list, result_dict)
-    result_dict = {}
-    for i in range(world_size):  # update the result dict
-        for k, v in gather_dict_list[i].items():
-            if k in result_dict.keys():
-                result_dict[k].extend(v)
-            else:
-                result_dict[k] = v
-
     # do nms for sliding window, if needed
     if post_cfg.sliding_window == True and post_cfg.nms is not None:
         # assert sliding_window=True
