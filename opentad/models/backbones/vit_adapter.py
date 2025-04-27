@@ -384,7 +384,11 @@ class Block(BaseModule):
             path1_disposable = Disposable(path1)
             del path1  # free memory ASAP
             path1 = self.attn(path1_disposable)
-            path1 = self.drop_path(path1)
+
+            # drop path is not used in inference,
+            # and it causes torch.compile to fail.
+            # path1 = self.drop_path(path1)
+
             x = x + path1
             del path1  # free memory ASAP
 
@@ -392,7 +396,11 @@ class Block(BaseModule):
             path2_disposable = Disposable(path2)
             del path2  # free memory ASAP
             path2 = self.mlp(path2_disposable)
-            path2 = self.drop_path(path2)
+
+            # drop path is not used in inference,
+            # and it causes torch.compile to fail.
+            # path2 = self.drop_path(path2)
+            
             x = x + path2
             del path2  # free memory ASAP
             
