@@ -7,7 +7,7 @@ import torch.utils.checkpoint as cp
 from mmengine.dataset import Compose
 from mmengine.registry import MODELS as MM_BACKBONES
 from mmengine.runner import load_checkpoint
-from ..utils import Disposable
+from opentad.utils import Disposable
 
 BACKBONES = MM_BACKBONES
 

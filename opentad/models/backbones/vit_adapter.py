@@ -15,7 +15,7 @@ from mmengine.model import BaseModule, ModuleList, Sequential
 from mmengine.model.weight_init import constant_init, trunc_normal_init
 from mmaction.utils import ConfigType, OptConfigType
 from mmaction.models.backbones.vit_mae import get_sinusoid_encoding
-from ..utils import Disposable
+from opentad.utils import Disposable
 from typing import Any
 
 def build_dropout(cfg: Dict, default_args: Optional[Dict] = None) -> Any:
