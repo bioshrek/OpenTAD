@@ -5,13 +5,13 @@ class Disposable(ObjectProxy):
     A wrapper for objects that need to be disposed of.
     """
 
-    def dispose(self):
+    def _dispose(self):
         """
         Dispose of the wrapped object.
         """
         self.__wrapped__ = None
 
-    def unwrap(self):
+    def _unwrap(self):
         """
         Unwrap the object and return it.
         """
@@ -23,7 +23,7 @@ class Disposable(ObjectProxy):
         Dispose of the object if it is a Disposable.
         """
         if isinstance(obj, cls):
-            obj.dispose()
+            obj._dispose()
     
     @classmethod
     def unwrap(cls, obj):
@@ -31,5 +31,5 @@ class Disposable(ObjectProxy):
         Unwrap the object and return it.
         """
         if isinstance(obj, cls):
-            return obj.unwrap()
+            return obj._unwrap()
         return obj
