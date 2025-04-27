@@ -64,19 +64,13 @@ class FFN(BaseModule):
         self.feedforward_channels = feedforward_channels
         self.num_fcs = num_fcs
 
-        self.linear = None
         layers = []
         in_channels = embed_dims
         for i in range(num_fcs - 1):
-            if i == 0:
-                self.linear = Linear(in_channels, feedforward_channels)
-                layers.append(
-                    Sequential(build_activation_layer(act_cfg), nn.Dropout(ffn_drop)))
-            else:
-                layers.append(
-                    Sequential(
-                        Linear(in_channels, feedforward_channels),
-                        build_activation_layer(act_cfg), nn.Dropout(ffn_drop)))
+            layers.append(
+                Sequential(
+                    Linear(in_channels, feedforward_channels),
+                    build_activation_layer(act_cfg), nn.Dropout(ffn_drop)))    
             in_channels = feedforward_channels
         layers.append(Linear(feedforward_channels, embed_dims))
         layers.append(nn.Dropout(ffn_drop))
@@ -95,15 +89,22 @@ class FFN(BaseModule):
 
         The function would add x to the output tensor if residue is None.
         """
-        disposable = x
-        out = self.linear(disposable)
 
-        # free memory ASAP
-        if isinstance(disposable, Disposable):
-            disposable.dispose()
-        del disposable
+        out = x
+        for idx, layer in enumerate(self.layers):
+            if isinstance(layer, Sequential):
+                for subIdx, subLayer in enumerate(layer):
+                    disposable = out
+                    out = subLayer(disposable)
 
-        out = self.layers(out)
+                    # free memory ASAP
+                    if idx == 0 and subIdx == 0 and isinstance(disposable, Disposable):
+                        disposable.dispose()
+                    
+                    del disposable
+            else:
+                out = layer(out)
+
         out = self.gamma2(out)
         if not self.add_identity:
             return self.dropout_layer(out)
