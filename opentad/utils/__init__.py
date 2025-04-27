@@ -2,6 +2,7 @@ from .misc import set_seed, update_workdir, create_folder, save_config, AverageM
 from .logger import setup_logger
 from .ema import ModelEma
 from .checkpoint import save_checkpoint, save_best_checkpoint
+from .disposable import Disposable
 
 __all__ = [
     "set_seed",
@@ -13,4 +14,5 @@ __all__ = [
     "ModelEma",
     "save_checkpoint",
     "save_best_checkpoint",
+    "Disposable",
 ]

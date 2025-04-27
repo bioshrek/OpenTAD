@@ -7,6 +7,7 @@ import torch.utils.checkpoint as cp
 from mmengine.dataset import Compose
 from mmengine.registry import MODELS as MM_BACKBONES
 from mmengine.runner import load_checkpoint
+from ..utils import Disposable
 
 BACKBONES = MM_BACKBONES
 
@@ -97,7 +98,9 @@ class BackboneWrapper(nn.Module):
                         self.temporal_checkpointing_chunk_dim,
                     )
                 else:
-                    features = self.model.backbone(frames)
+                    frames_disposable = Disposable(frames)
+                    del frames  # free memory ASAP
+                    features = self.model.backbone(frames_disposable)
 
         else:  # let the model.train() or model.eval() decide whether to freeze
             if self.use_temporal_checkpointing:
@@ -107,7 +110,9 @@ class BackboneWrapper(nn.Module):
                     self.temporal_checkpointing_chunk_dim,
                 )
             else:
-                features = self.model.backbone(frames)
+                frames_disposable = Disposable(frames)
+                del frames  # free memory ASAP
+                features = self.model.backbone(frames_disposable)
 
         # unflatten and pool the features
         if isinstance(features, (tuple, list)):
