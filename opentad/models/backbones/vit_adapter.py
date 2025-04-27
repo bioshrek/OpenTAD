@@ -95,12 +95,11 @@ class FFN(BaseModule):
             if isinstance(layer, Sequential):
                 for subIdx, subLayer in enumerate(layer):
                     disposable = out
-                    out = subLayer(disposable)
+                    out = subLayer(Disposable.unwrap(disposable))
 
                     # free memory ASAP
-                    if idx == 0 and subIdx == 0 and isinstance(disposable, Disposable):
-                        disposable.dispose()
-                    
+                    if idx == 0 and subIdx == 0:
+                        Disposable.dispose(disposable)
                     del disposable
             else:
                 out = layer(out)
@@ -263,13 +262,12 @@ class Attention(BaseModule):
         if hasattr(self, "q_bias"):
             k_bias = torch.zeros_like(self.v_bias, requires_grad=False)
             qkv_bias = torch.cat((self.q_bias, k_bias, self.v_bias))
-            qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+            qkv = F.linear(input=Disposable.unwrap(x), weight=self.qkv.weight, bias=qkv_bias)
         else:
-            qkv = self.qkv(x)
+            qkv = self.qkv(Disposable.unwrap(x))
 
         # free memory ASAP
-        if isinstance(x, Disposable):
-            x.dispose()
+        Disposable.dispose(x)
         del x
 
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
@@ -592,11 +590,10 @@ class VisionTransformerAdapter(BaseModule):
         b, _, _, h, w = disposable.shape
         h //= self.patch_size
         w //= self.patch_size
-        x = self.patch_embed(disposable)[0]
+        x = self.patch_embed(Disposable.unwrap(disposable))[0]
 
         # freeze input ASAP
-        if isinstance(disposable, Disposable):
-            disposable.dispose()
+        Disposable.dispose(disposable)
         del disposable
 
         if (h, w) != self.grid_size:
