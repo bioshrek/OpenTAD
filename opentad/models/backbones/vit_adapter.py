@@ -89,20 +89,17 @@ class FFN(BaseModule):
 
         The function would add x to the output tensor if residue is None.
         """
+        
+        fst_layer = self.layers[0]
+        rest_layers = nn.Sequential(*list(self.layers.children())[1:])
 
-        out = x
-        for idx, layer in enumerate(self.layers):
-            if isinstance(layer, Sequential):
-                for subIdx, subLayer in enumerate(layer):
-                    disposable = out
-                    out = subLayer(Disposable.unwrap(disposable))
+        disposable = x
+        out = fst_layer(Disposable.unwrap(disposable))
 
-                    # free memory ASAP
-                    if idx == 0 and subIdx == 0:
-                        Disposable.dispose(disposable)
-                    del disposable
-            else:
-                out = layer(out)
+        Disposable.dispose(disposable)
+        del disposable
+
+        out = rest_layers(out)
 
         out = self.gamma2(out)
         if not self.add_identity:
