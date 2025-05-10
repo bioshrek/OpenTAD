@@ -65,6 +65,7 @@ def main():
         cfg.dataset.test.ann_file = annotation_file
 
         cfg.dataset.test.subset_name = "test"
+        cfg.work_dir = args.inference_dir
 
     # build dataset
     test_dataset = build_dataset(cfg.dataset.test, default_args=dict(logger=logger))
