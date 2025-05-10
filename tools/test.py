@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--id", type=int, default=0, help="repeat experiment id")
     parser.add_argument("--not_eval", action="store_true", help="whether to not to eval, only do inference")
     parser.add_argument("--cfg-options", nargs="+", action=DictAction, help="override settings")
+    parser.add_argument("--inference-dir", type=str, default=None, help="inference directory")
     args = parser.parse_args()
     return args
 
@@ -51,6 +52,19 @@ def main():
     logger = setup_logger("Test", save_dir=cfg.work_dir)
     logger.info(f"Using torch version: {torch.__version__}, CUDA version: {torch.version.cuda}")
     logger.info(f"Config: \n{cfg.pretty_text}")
+
+    # override config for inference
+    if args.inference_dir is not None:
+        if not os.path.exists(args.inference_dir):
+            raise ValueError(f"Invalid inference directory: {args.inference_dir}")
+        cfg.dataset.test.data_path = args.inference_dir
+
+        annotation_file = os.path.join(args.inference_dir, "annotation.json")
+        if not os.path.exists(annotation_file):
+            raise ValueError(f"Invalid annotation file: {annotation_file}")
+        cfg.dataset.test.ann_file = annotation_file
+
+        cfg.dataset.test.subset_name = "test"
 
     # build dataset
     test_dataset = build_dataset(cfg.dataset.test, default_args=dict(logger=logger))
