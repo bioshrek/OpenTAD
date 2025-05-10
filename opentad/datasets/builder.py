@@ -43,6 +43,17 @@ def build_dataloader(dataset, batch_size, rank, world_size, shuffle=False, drop_
     )
     return dataloader
 
+def build_sequential_dataloader(dataset, batch_size, shuffle=False, drop_last=False, **kwargs):
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        collate_fn=collate,
+        pin_memory=True,
+        drop_last=drop_last,
+        **kwargs,
+    )
+    return dataloader
 
 def collate(batch):
     if not isinstance(batch, Sequence):

@@ -6,15 +6,125 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 from torch import Tensor, nn
-from mmcv.cnn import build_norm_layer
+from mmcv.cnn import build_norm_layer, Linear, build_activation_layer
 from mmcv.cnn.bricks import DropPath
-from mmcv.cnn.bricks.transformer import FFN, PatchEmbed
+from mmcv.cnn.bricks.transformer import PatchEmbed
+from mmcv.cnn.bricks.scale import LayerScale
 from mmengine.registry import MODELS
-from mmengine.model import BaseModule, ModuleList
+from mmengine.model import BaseModule, ModuleList, Sequential
 from mmengine.model.weight_init import constant_init, trunc_normal_init
 from mmaction.utils import ConfigType, OptConfigType
 from mmaction.models.backbones.vit_mae import get_sinusoid_encoding
+from opentad.utils import Disposable
+from typing import Any, Tuple
 
+def build_dropout(cfg: Dict, default_args: Optional[Dict] = None) -> Any:
+    """Builder for drop out layers."""
+    return MODELS.build(cfg, default_args=default_args)
+
+class FFN(BaseModule):
+    """Implements feed-forward networks (FFNs) with identity connection.
+    copied from mmcv.cnn.bricks.transformer.FFN.
+
+    Args:
+        embed_dims (int): The feature dimension. Same as
+            `MultiheadAttention`. Defaults: 256.
+        feedforward_channels (int): The hidden dimension of FFNs.
+            Defaults: 1024.
+        num_fcs (int, optional): The number of fully-connected layers in
+            FFNs. Default: 2.
+        act_cfg (dict, optional): The activation config for FFNs.
+            Default: dict(type='ReLU')
+        ffn_drop (float, optional): Probability of an element to be
+            zeroed in FFN. Default 0.0.
+        add_identity (bool, optional): Whether to add the
+            identity connection. Default: `True`.
+        dropout_layer (obj:`ConfigDict`): The dropout_layer used
+            when adding the shortcut.
+        init_cfg (obj:`mmcv.ConfigDict`): The Config for initialization.
+            Default: None.
+        layer_scale_init_value (float): Initial value of scale factor in
+            LayerScale. Default: 1.0
+    """
+
+    def __init__(self,
+                 embed_dims=256,
+                 feedforward_channels=1024,
+                 num_fcs=2,
+                 act_cfg=dict(type='ReLU', inplace=True),
+                 ffn_drop=0.,
+                 dropout_layer=None,
+                 add_identity=True,
+                 init_cfg=None,
+                 layer_scale_init_value=0.):
+        super().__init__(init_cfg)
+        assert num_fcs >= 2, 'num_fcs should be no less ' \
+            f'than 2. got {num_fcs}.'
+        self.embed_dims = embed_dims
+        self.feedforward_channels = feedforward_channels
+        self.num_fcs = num_fcs
+
+        layers = []
+        in_channels = embed_dims
+        for i in range(num_fcs - 1):
+            layers.append(
+                Sequential(
+                    Linear(in_channels, feedforward_channels),
+                    build_activation_layer(act_cfg), nn.Dropout(ffn_drop)))    
+            in_channels = feedforward_channels
+        layers.append(Linear(feedforward_channels, embed_dims))
+        layers.append(nn.Dropout(ffn_drop))
+        self.layers = Sequential(*layers)
+        self.dropout_layer = build_dropout(
+            dropout_layer) if dropout_layer else torch.nn.Identity()
+        self.add_identity = add_identity
+
+        if layer_scale_init_value > 0:
+            self.gamma2 = LayerScale(embed_dims, scale=layer_scale_init_value)
+        else:
+            self.gamma2 = nn.Identity()
+
+    def forward(self, x, identity=None):
+        """Forward function for `FFN`.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        
+        fst_layer = self.layers[0]
+        rest_layers = nn.Sequential(*list(self.layers.children())[1:])
+
+        out = fst_layer(x)
+        out = rest_layers(out)
+
+        out = self.gamma2(out)
+        if not self.add_identity:
+            return self.dropout_layer(out)
+        if identity is None:
+            identity = x
+        return identity + self.dropout_layer(out)
+    
+    def forward_step1(self, x: Tensor) -> Tensor:
+        """Forward function for `FFN` in step1.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        out = self.layers[0](x)
+        return out
+
+    def forward_step2(self, x: Tensor, identity: Optional[Tensor] = None) -> Tensor:
+        """Forward function for `FFN` in step2.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        rest_layers = nn.Sequential(*list(self.layers.children())[1:])
+        out = rest_layers(x)
+        
+        out = self.gamma2(out)
+        if not self.add_identity:
+            return self.dropout_layer(out)
+        if identity is None:
+            identity = x
+        return identity + self.dropout_layer(out)
 
 class Adapter(BaseModule):
     def __init__(
@@ -70,9 +180,12 @@ class Adapter(BaseModule):
         attn = attn.unflatten(0, (-1, h, w)).permute(0, 4, 1, 2, 3)  # [b,t,h,w,c] [1,384,10,10,384]
         attn = attn.reshape(B, N, C)
         x = x + attn
+        del attn  # free memory ASAP
 
         x = self.up_proj(x)
-        return x * self.gamma + inputs
+        x = x * self.gamma
+        x = x + inputs
+        return x
 
 
 class PlainAdapter(BaseModule):
@@ -180,12 +293,54 @@ class Attention(BaseModule):
 
         # fast attention
         x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p)
+        del q, k, v, qkv  # free memory ASAP
         x = x.transpose(1, 2).reshape(B, N, -1)
 
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+    
+    def forward_step1(self, x: Tensor) -> Tensor:
+        """Forward function for `Attention` in step1.
 
+        The function would add x to the output tensor if residue is None.
+        """
+
+        if hasattr(self, "q_bias"):
+            k_bias = torch.zeros_like(self.v_bias, requires_grad=False)
+            qkv_bias = torch.cat((self.q_bias, k_bias, self.v_bias))
+            qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+        else:
+            qkv = self.qkv(x)
+
+        return qkv
+    
+    def forward_step2(self, qkv: Tensor, shape: Tuple[int, int, int]) -> Tensor:
+        B, N, C = shape
+
+        qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # standard self-attention
+        # q = q * self.scale
+        # attn = q @ k.transpose(-2, -1)
+        # attn = attn.softmax(dim=-1)
+        # attn = self.attn_drop(attn)
+        # x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+
+        # fast attention
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p)
+        x = x.transpose(1, 2).reshape(B, N, -1)
+        return x
+
+    def forward_step3(self, x: Tensor) -> Tensor:
+        """Forward function for `Attention` in step3.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 class Block(BaseModule):
     """The basic block in the Vision Transformer.
@@ -278,14 +433,54 @@ class Block(BaseModule):
             Tensor: The output of the transformer block, same size as inputs.
         """
 
-        def _inner_forward(x):
-            """Forward wrapper for utilizing checkpoint."""
+        @torch.compile(dynamic=False)
+        def _inner_forward_before_adapter_inference(x):
+            path1 = self.norm1(x)
+            path1_shape = path1.shape
+            path1 = self.attn.forward_step1(path1)
+            path1 = self.attn.forward_step2(path1, path1_shape)
+            path1 = self.attn.forward_step3(path1)
+
+            # drop path is not used in inference,
+            # and it causes torch.compile to fail.
+            # path1 = self.drop_path(path1)
+
+            x = x + path1
+            del path1  # free memory ASAP
+
+            path2 = self.norm2(x)
+            path2 = self.mlp.forward_step1(path2)
+            path2 = self.mlp.forward_step2(path2)
+
+            # drop path is not used in inference,
+            # and it causes torch.compile to fail.
+            # path2 = self.drop_path(path2)
+            
+            x = x + path2
+            del path2  # free memory ASAP
+            
+            return x
+
+        def _inner_forward_before_adapter_training(x):
             x = x + self.drop_path(self.attn(self.norm1(x)))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
+
+        def _inner_forward(x):
+            """Forward wrapper for utilizing checkpoint."""
+            if self.training:
+                x = _inner_forward_before_adapter_training(x)
+            else:
+                x = _inner_forward_before_adapter_inference(x)
 
             if self.use_adapter:
                 x = self.adapter(x, h, w)
             return x
+
+        # x's shape will change after the first forward.
+        # so we need to make sure x is contiguous,
+        # if we want to compile the model.
+        x = x.contiguous()  
 
         if self.with_cp and x.requires_grad:
             x = cp.checkpoint(_inner_forward, x)
@@ -450,10 +645,17 @@ class VisionTransformerAdapter(BaseModule):
         """
         self._freeze_layers()
 
-        b, _, _, h, w = x.shape
+        # patch embedding
+        disposable = x
+        b, _, _, h, w = disposable.shape
         h //= self.patch_size
         w //= self.patch_size
-        x = self.patch_embed(x)[0]
+        x = self.patch_embed(Disposable.unwrap(disposable))[0]
+
+        # freeze input ASAP
+        Disposable.dispose(disposable)
+        del disposable
+
         if (h, w) != self.grid_size:
             pos_embed = self.pos_embed.reshape(-1, *self.grid_size, self.embed_dims)
             pos_embed = pos_embed.permute(0, 3, 1, 2)
@@ -464,6 +666,7 @@ class VisionTransformerAdapter(BaseModule):
             pos_embed = self.pos_embed
 
         x = x + pos_embed
+        del pos_embed  # free memory ASAP
         x = self.pos_drop(x)
 
         for blk in self.blocks:

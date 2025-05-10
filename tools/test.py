@@ -8,14 +8,13 @@ if path not in sys.path:
 
 import argparse
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel
+from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from mmengine.config import Config, DictAction
 from opentad.models import build_detector
-from opentad.datasets import build_dataset, build_dataloader
+from opentad.datasets import build_dataset, build_sequential_dataloader
 from opentad.cores import eval_one_epoch
 from opentad.utils import update_workdir, set_seed, create_folder, setup_logger
-
+from datetime import datetime
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test a Temporal Action Detector")
@@ -30,6 +29,9 @@ def parse_args():
 
 
 def main():
+    # Start recording memory snapshot history
+    torch.cuda.memory._record_memory_history(max_entries=100000)
+
     args = parse_args()
 
     # load config
@@ -37,31 +39,23 @@ def main():
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
 
-    # DDP init
-    args.local_rank = int(os.environ["LOCAL_RANK"])
-    args.world_size = int(os.environ["WORLD_SIZE"])
-    args.rank = int(os.environ["RANK"])
-    print(f"Distributed init (rank {args.rank}/{args.world_size}, local rank {args.local_rank})")
-    dist.init_process_group("nccl", rank=args.rank, world_size=args.world_size)
-    torch.cuda.set_device(args.local_rank)
+    # Use single GPU
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # set random seed, create work_dir
     set_seed(args.seed)
-    cfg = update_workdir(cfg, args.id, torch.cuda.device_count())
-    if args.rank == 0:
-        create_folder(cfg.work_dir)
+    cfg = update_workdir(cfg, args.id, 1)  # Use 1 for single GPU
+    create_folder(cfg.work_dir)
 
     # setup logger
-    logger = setup_logger("Test", save_dir=cfg.work_dir, distributed_rank=args.rank)
+    logger = setup_logger("Test", save_dir=cfg.work_dir)
     logger.info(f"Using torch version: {torch.__version__}, CUDA version: {torch.version.cuda}")
     logger.info(f"Config: \n{cfg.pretty_text}")
 
     # build dataset
     test_dataset = build_dataset(cfg.dataset.test, default_args=dict(logger=logger))
-    test_loader = build_dataloader(
+    test_loader = build_sequential_dataloader(
         test_dataset,
-        rank=args.rank,
-        world_size=args.world_size,
         shuffle=False,
         drop_last=False,
         **cfg.solver.test,
@@ -70,10 +64,9 @@ def main():
     # build model
     model = build_detector(cfg.model)
 
-    # DDP
-    model = model.to(args.local_rank)
-    model = DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank)
-    logger.info(f"Using DDP with total {args.world_size} GPUS...")
+    # Move model to device
+    model = model.to(device)
+    logger.info(f"Using device: {device}")
 
     if cfg.inference.load_from_raw_predictions:  # if load with saved predictions, no need to load checkpoint
         logger.info(f"Loading from raw predictions: {cfg.inference.fuse_list}")
@@ -85,17 +78,22 @@ def main():
         else:
             checkpoint_path = os.path.join(cfg.work_dir, "checkpoint/best.pth")
         logger.info("Loading checkpoint from: {}".format(checkpoint_path))
-        device = f"cuda:{args.rank % torch.cuda.device_count()}"
         checkpoint = torch.load(checkpoint_path, map_location=device)
         logger.info("Checkpoint is epoch {}.".format(checkpoint["epoch"]))
 
         # Model EMA
         use_ema = getattr(cfg.solver, "ema", False)
         if use_ema:
-            model.load_state_dict(checkpoint["state_dict_ema"])
+            state_dict = checkpoint["state_dict_ema"]
+            # Remove prefix 'module.' from the state_dict keys
+            consume_prefix_in_state_dict_if_present(state_dict, "module.")
+            model.load_state_dict(state_dict, strict=True)
             logger.info("Using Model EMA...")
         else:
-            model.load_state_dict(checkpoint["state_dict"])
+            state_dict = checkpoint["state_dict"]
+            # Remove prefix 'module.' from the state_dict keys
+            consume_prefix_in_state_dict_if_present(state_dict, "module.")
+            model.load_state_dict(state_dict, strict=True)
 
     # AMP: automatic mixed precision
     use_amp = getattr(cfg.solver, "amp", False)
@@ -109,14 +107,18 @@ def main():
         model,
         cfg,
         logger,
-        args.rank,
+        rank=0,
         model_ema=None,  # since we have loaded the ema model above
         use_amp=use_amp,
-        world_size=args.world_size,
+        world_size=1,
         not_eval=args.not_eval,
     )
     logger.info("Testing Over...\n")
 
+    # Dump memory snapshot history to a file and stop recording
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    torch.cuda.memory._dump_snapshot(os.path.join(cfg.work_dir, f"memory_profile_{current_time}.pkl"))
+    torch.cuda.memory._record_memory_history(enabled=None)
 
 if __name__ == "__main__":
     main()

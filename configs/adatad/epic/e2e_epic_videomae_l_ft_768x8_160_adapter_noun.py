@@ -89,7 +89,7 @@ model = dict(
             format_shape="NCTHW",
         ),
         custom=dict(
-            pretrain="pretrained/vit-large-p16_videomae-epic_noun.pth",
+            # pretrain="pretrained/vit-large-p16_videomae-epic_noun.pth",
             pre_processing_pipeline=[
                 dict(type="Rearrange", keys=["frames"], ops="b n c (t1 t) h w -> (b t1) n c t h w", t1=chunk_num),
             ],
@@ -122,8 +122,8 @@ model = dict(
 
 solver = dict(
     train=dict(batch_size=2, num_workers=2),
-    val=dict(batch_size=2, num_workers=2),
-    test=dict(batch_size=2, num_workers=2),
+    val=dict(batch_size=1, num_workers=1),
+    test=dict(batch_size=1, num_workers=1),
     clip_grad_norm=1,
     amp=True,
     fp16_compress=True,
@@ -156,7 +156,7 @@ post_processing = dict(
         multiclass=True,
         voting_thresh=0.75,  #  set 0 to disable
     ),
-    save_dict=False,
+    save_dict=True,
 )
 
 workflow = dict(
