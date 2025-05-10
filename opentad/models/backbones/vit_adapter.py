@@ -16,7 +16,7 @@ from mmengine.model.weight_init import constant_init, trunc_normal_init
 from mmaction.utils import ConfigType, OptConfigType
 from mmaction.models.backbones.vit_mae import get_sinusoid_encoding
 from opentad.utils import Disposable
-from typing import Any
+from typing import Any, Tuple
 
 def build_dropout(cfg: Dict, default_args: Optional[Dict] = None) -> Any:
     """Builder for drop out layers."""
@@ -93,14 +93,32 @@ class FFN(BaseModule):
         fst_layer = self.layers[0]
         rest_layers = nn.Sequential(*list(self.layers.children())[1:])
 
-        disposable = x
-        out = fst_layer(Disposable.unwrap(disposable))
-
-        Disposable.dispose(disposable)
-        del disposable
-
+        out = fst_layer(x)
         out = rest_layers(out)
 
+        out = self.gamma2(out)
+        if not self.add_identity:
+            return self.dropout_layer(out)
+        if identity is None:
+            identity = x
+        return identity + self.dropout_layer(out)
+    
+    def forward_step1(self, x: Tensor) -> Tensor:
+        """Forward function for `FFN` in step1.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        out = self.layers[0](x)
+        return out
+
+    def forward_step2(self, x: Tensor, identity: Optional[Tensor] = None) -> Tensor:
+        """Forward function for `FFN` in step2.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        rest_layers = nn.Sequential(*list(self.layers.children())[1:])
+        out = rest_layers(x)
+        
         out = self.gamma2(out)
         if not self.add_identity:
             return self.dropout_layer(out)
@@ -259,13 +277,9 @@ class Attention(BaseModule):
         if hasattr(self, "q_bias"):
             k_bias = torch.zeros_like(self.v_bias, requires_grad=False)
             qkv_bias = torch.cat((self.q_bias, k_bias, self.v_bias))
-            qkv = F.linear(input=Disposable.unwrap(x), weight=self.qkv.weight, bias=qkv_bias)
+            qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         else:
-            qkv = self.qkv(Disposable.unwrap(x))
-
-        # free memory ASAP
-        Disposable.dispose(x)
-        del x
+            qkv = self.qkv(x)
 
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
@@ -285,7 +299,48 @@ class Attention(BaseModule):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+    
+    def forward_step1(self, x: Tensor) -> Tensor:
+        """Forward function for `Attention` in step1.
 
+        The function would add x to the output tensor if residue is None.
+        """
+
+        if hasattr(self, "q_bias"):
+            k_bias = torch.zeros_like(self.v_bias, requires_grad=False)
+            qkv_bias = torch.cat((self.q_bias, k_bias, self.v_bias))
+            qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+        else:
+            qkv = self.qkv(x)
+
+        return qkv
+    
+    def forward_step2(self, qkv: Tensor, shape: Tuple[int, int, int]) -> Tensor:
+        B, N, C = shape
+
+        qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # standard self-attention
+        # q = q * self.scale
+        # attn = q @ k.transpose(-2, -1)
+        # attn = attn.softmax(dim=-1)
+        # attn = self.attn_drop(attn)
+        # x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+
+        # fast attention
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p)
+        x = x.transpose(1, 2).reshape(B, N, -1)
+        return x
+
+    def forward_step3(self, x: Tensor) -> Tensor:
+        """Forward function for `Attention` in step3.
+
+        The function would add x to the output tensor if residue is None.
+        """
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 class Block(BaseModule):
     """The basic block in the Vision Transformer.
@@ -381,9 +436,10 @@ class Block(BaseModule):
         @torch.compile(dynamic=False)
         def _inner_forward_before_adapter_inference(x):
             path1 = self.norm1(x)
-            path1_disposable = Disposable(path1)
-            del path1  # free memory ASAP
-            path1 = self.attn(path1_disposable)
+            path1_shape = path1.shape
+            path1 = self.attn.forward_step1(path1)
+            path1 = self.attn.forward_step2(path1, path1_shape)
+            path1 = self.attn.forward_step3(path1)
 
             # drop path is not used in inference,
             # and it causes torch.compile to fail.
@@ -393,9 +449,8 @@ class Block(BaseModule):
             del path1  # free memory ASAP
 
             path2 = self.norm2(x)
-            path2_disposable = Disposable(path2)
-            del path2  # free memory ASAP
-            path2 = self.mlp(path2_disposable)
+            path2 = self.mlp.forward_step1(path2)
+            path2 = self.mlp.forward_step2(path2)
 
             # drop path is not used in inference,
             # and it causes torch.compile to fail.
